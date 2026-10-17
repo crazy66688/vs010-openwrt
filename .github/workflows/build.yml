@@ -102,6 +102,24 @@ jobs:
           sed -i '/^[[:space:]]*cmcc,mr3000d-ci/i\\tunicom,vs010|\\' \
           openwrt/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network
 
+      - name: Configure build
+        run: |
+            cd openwrt
+            cat > .config << 'EOF'
+            CONFIG_TARGET_qualcommax=y
+            CONFIG_TARGET_qualcommax_ipq50xx=y
+            CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_unicom_vs010=y
+            CONFIG_TARGET_ROOTFS_SQUASHFS=y
+            CONFIG_ATH11K_MEM_PROFILE_256M=y
+            EOF
+            make defconfig
+            grep vs010 .config || echo "WARNING: vs010 target not found in .config"
+
+      - name: Build OpenWrt
+        run: |
+          cd openwrt
+          make -j$(nproc) V=s 2>&1 | tee build.log
+
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
