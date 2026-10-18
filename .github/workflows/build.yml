@@ -47,6 +47,11 @@ jobs:
         run: |
           cp ipq5018-vs010.dts openwrt/target/linux/qualcommax/dts/
 
+      - name: Check DTS compile
+        run: |
+          cd openwrt
+          make target/linux/compile V=s 2>&1 | tee build.log
+
       - name: Add device to ipq50xx.mk
         run: |
           cat >> openwrt/target/linux/qualcommax/image/ipq50xx.mk << 'MKEOF'
