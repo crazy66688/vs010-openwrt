@@ -1,0 +1,211 @@
+# LiBwrt VS010 OpenWrt 编译工作流
+# 适配 LiBwrt/ipq50xx 非标准目录结构
+# 仓库: https://github.com/LiBwrt/ipq50xx.git
+
+name: Build VS010 OpenWrt Firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          path: vs010-repo
+
+      - name: Clone OpenWrt source (LiBwrt/ipq50xx)
+        run: |
+          git clone --depth=1 --single-branch https://github.com/LiBwrt/ipq50xx.git openwrt
+        timeout-minutes: 15
+
+      - name: Install build dependencies
+        run: |
+          cd openwrt
+          sudo apt update -qq
+          sudo apt install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools python3-distutils rsync swig unzip zlib1g-dev \
+            file wget quilt time bc libelf-dev ccache subversion binutils \
+            bzip2 diffutils findutils perl python3 make autoconf automake \
+            libtool patch xsltproc
+        timeout-minutes: 15
+
+      - name: Update feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update packages luci routing
+        timeout-minutes: 10
+
+      - name: Install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds install -a
+        timeout-minutes: 10
+
+      - name: Inspect LiBwrt directory structure
+        run: |
+          cd openwrt
+          echo "=== qualcommax target contents ==="
+          ls -la target/linux/qualcommax/
+          echo "=== dts directory ==="
+          ls -la target/linux/qualcommax/files/arch/arm/boot/dts/qcom/ 2>/dev/null || echo "DTS dir not found"
+          echo "=== image directory ==="
+          ls -la target/linux/qualcommax/image/
+          echo "=== find all .dts files ==="
+          find target/linux/qualcommax -name "*.dts" -o -name "*.dtsi" | head -30
+        timeout-minutes: 5
+
+      - name: Copy DTS to LiBwrt non-standard path
+        run: |
+          cd openwrt
+          # LiBwrt 使用非标准路径存放 DTS
+          mkdir -p target/linux/qualcommax/files/arch/arm/boot/dts/qcom/
+          cp ../../vs010-repo/ipq5018-vs010.dts target/linux/qualcommax/files/arch/arm/boot/dts/qcom/ipq5018-vs010.dts
+          ls -la target/linux/qualcommax/files/arch/arm/boot/dts/qcom/ipq5018-vs010.dts
+        timeout-minutes: 5
+
+      - name: Add VS010 device to ipq50xx.mk
+        run: |
+          cd openwrt
+          # LiBwrt 的设备定义在 image/ipq50xx.mk（64位）
+          cat >> target/linux/qualcommax/image/ipq50xx.mk << 'MKEOF'
+
+          define Device/unicom_vs010
+          	$(call Device/FitImageLzma)
+          	$(call Device/UbiFit)
+          	DEVICE_VENDOR := Unicom
+          	DEVICE_MODEL := VS010
+          	DEVICE_DTS_CONFIG := config@mp02.1
+          	SOC := ipq5018
+          	BLOCKSIZE := 128k
+          	PAGESIZE := 2048
+          	IMAGE_SIZE := 59392k
+          	NAND_SIZE := 128m
+          	IMAGES += factory.img
+          	IMAGE/factory.img := append-ubi | qsdk-ipq-factory-nand
+          	DEVICE_PACKAGES := ath11k-firmware-ipq5018-qcn6122 \
+          		luci \
+          		luci-i18n-base-zh-cn \
+          		luci-i18n-firewall-zh-cn \
+          		luci-i18n-opkg-zh-cn \
+          		luci-i18n-smartdns-zh-cn \
+          		dropbear \
+          		openssh-sftp-server \
+          		dnsmasq-full \
+          		smartdns \
+          		luci-app-smartdns \
+          		https-dns-proxy \
+          		luci-app-https-dns-proxy \
+          		luci-app-adblock \
+          		luci-app-sqm \
+          		adblock \
+          		sqm-scripts \
+          		wireguard-tools \
+          		luci-proto-wireguard \
+          		kmod-wireguard \
+          		curl \
+          		wget-ssl \
+          		iperf3 \
+          		htop \
+          		nano
+          endef
+          TARGET_DEVICES += unicom_vs010
+          MKEOF
+          echo "=== Verify device definition ==="
+          grep -A 3 "unicom_vs010" target/linux/qualcommax/image/ipq50xx.mk | tail -5
+        timeout-minutes: 5
+
+      - name: Create uci-defaults directory and scripts
+        run: |
+          cd openwrt
+          mkdir -p target/linux/qualcommax/files/etc/uci-defaults
+          cat > target/linux/qualcommax/files/etc/uci-defaults/99-custom << 'UCIEOF'
+          #!/bin/sh
+          # VS010 custom configuration
+          echo "VS010 custom config applied"
+          UCIEOF
+          chmod 755 target/linux/qualcommax/files/etc/uci-defaults/99-custom
+        timeout-minutes: 5
+
+      - name: Register device in 02_network
+        run: |
+          cd openwrt
+          # LiBwrt 的 02_network 路径可能不同，先查找
+          NETWORK_FILE=$(find target/linux/qualcommax -name "02_network" 2>/dev/null | head -1)
+          if [ -n "$NETWORK_FILE" ]; then
+            echo "Found 02_network at: $NETWORK_FILE"
+            grep -q "unicom,vs010" "$NETWORK_FILE" || \
+            sed -i '/cmcc,mr3000d-ci/i\\tunicom,vs010|\' "$NETWORK_FILE"
+            echo "=== Updated 02_network ==="
+            grep "vs010\|mr3000d" "$NETWORK_FILE"
+          else
+            echo "WARNING: 02_network not found, skipping network registration"
+          fi
+        timeout-minutes: 5
+
+      - name: Configure build (.config)
+        run: |
+          cd openwrt
+          cat > .config << 'EOF'
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq50xx=y
+          CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_unicom_vs010=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_ATH11K_MEM_PROFILE_256M=y
+          EOF
+          make defconfig
+          echo "=== Check vs010 in config ==="
+          grep vs010 .config || echo "WARNING: vs010 target not found in .config"
+        timeout-minutes: 10
+
+      - name: Verify build prerequisites
+        run: |
+          cd openwrt
+          echo "=== Check DTS file exists ==="
+          ls -la target/linux/qualcommax/files/arch/arm/boot/dts/qcom/ipq5018-vs010.dts || echo "DTS missing!"
+          echo "=== Check device definition ==="
+          grep "unicom_vs010" target/linux/qualcommax/image/ipq50xx.mk || echo "Device def missing!"
+          echo "=== Check .config ==="
+          grep "CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_unicom_vs010" .config || echo "Config missing!"
+        timeout-minutes: 5
+
+      - name: Build OpenWrt
+        run: |
+          cd openwrt
+          make -j$(nproc) V=s 2>&1 | tee build.log
+        timeout-minutes: 120
+
+      - name: Check build result
+        if: always()
+        run: |
+          cd openwrt
+          echo "=== Firmware files ==="
+          find bin/targets -name "*vs010*" -type f 2>/dev/null || echo "No vs010 firmware found"
+          echo "=== Build log errors ==="
+          grep -i -E 'ERROR:|Error|failed|missing|Build complete' build.log 2>/dev/null | tail -40 || echo "No build.log found"
+          echo "=== Last 50 lines of build.log ==="
+          tail -50 build.log 2>/dev/null || echo "No build.log found"
+
+      - name: Upload firmware
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vs010-openwrt-firmware
+          path: |
+            openwrt/bin/targets/qualcommax/ipq50xx/*vs010*
+          if-no-files-found: warn
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vs010-build-log
+          path: |
+            openwrt/build.log
+          if-no-files-found: warn
